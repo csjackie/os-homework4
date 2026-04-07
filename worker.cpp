@@ -11,46 +11,46 @@ struct msgbuffer {
 };
 
 int main(int argc, char** argv) {
-	// attach to same message queue
-	key_t key = ftok(".", 'A');
-	int msqid = msgget(key, 0666);
-	if (msqid == -1) {
-		perror("msgget failed");
-		exit(1);
+	if (argc < 2) {
+		perror("missing msqid");
+		return 1;
 	}
 
-	pid_t mypid = getpid();
+	int msqid = atoi(argv[1]);
+	pid_t pid = getpid();
 
-    	// Seed random using PID
-    	srand(mypid);
+	// Seed random using PID
+    	srand(time(nullptr) ^ pid);
 
-	int totalUsed = 0;
+	int totalCPU = 0;
+
 	while (true) {
 		msgbuffer msg;
 
 		// wait for message from oss
-		if (msgrcv(msqid, &msg, sizeof(int), mypid, 0) == -1) {
+		if (msgrcv(msqid, &msg, sizeof(msg.quantum), getpid(), 0) == -1) {
 	            perror("msgrcv failed");
         	    exit(1);
         	}	
 
         	int quantum = msg.quantum;
+
+		int action = rand() % 100;
+		int usedTime = 0;
+
         	msgbuffer response;
         	response.mtype = 1;
-	
-		int action = rand() % 100;
 
 		if (action < 20) {
-			int timeUsed = 1 + rand() % quantum;
-			totalUsed += timeUsed;
-			response.quantum = timeUsed;
+			usedTime = 1 + rand() % quantum;
+			response.quantum = usedTime;
 		}
 
 		else if (action < 40) {
-         	   	int timeUsed = 1 + rand() % quantum;
-		   	totalUsed += timeUsed;
-			response.quantum = -timeUsed;
-		   	if (msgsnd(msqid, &response, sizeof(int), 0) == -1) {
+			usedTime = 1 +rand() % quantum;
+		     	response.quantum = -usedTime;	
+
+			if (msgsnd(msqid, &response, sizeof(response.quantum), 0) == -1) {
 			   	perror("msgsnd failed");
 			   	exit(1);
 		   	}
@@ -58,12 +58,13 @@ int main(int argc, char** argv) {
         	}
 
 		else {
-			int remaining = quantum;
-			response.quantum = quantum;
-			totalUsed += remaining;
+			usedTime = quantum;
+			response.quantum = usedTime;
 		}
 
-		if (msgsnd(msqid, &response, sizeof(int), 0) == -1) {
+		totalCPU += usedTime;
+
+		if (msgsnd(msqid, &response, sizeof(response.quantum), 0) == -1) {
 			perror("msgsnd failed");
 			exit(1);
 		}
