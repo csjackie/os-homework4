@@ -7,13 +7,15 @@
 #include <signal.h>
 #include <ctime>
 #include <queue>
+#include <cstring>
+#include <fstream>
 
-// initialize system clock - seconds = 0, nanoseconds = 0
+// Structs
 struct SimulatedClock {
         unsigned int seconds;
         unsigned int nanoseconds;
+};
 
-// create process control block
 struct PCB {
                 int occupied;
                 pid_t pid;
@@ -26,25 +28,18 @@ struct PCB {
                 int blocked;
 };
 
-// setup message struct
 struct msgbuffer {
 	long mtype;
 	int quantum;
 };
 
-// setup message queue
-typedef struct msgbuffer {
-        long mtype;
-        char strData[100];
-        int intData;
-} msgbuffer;
-
-// add variables
-int activeChildren = 0;
-int totalLaunched = 0;
-int totalFinished = 0;
-
+// Globals
 std::string filename = "log.txt";
+
+void signal_handler(int sig) {
+	std::cout << "Caught signal " << sig << ", terminating...\n";
+	exit(1);
+}
 
 // Main function
 int main(int argc, char **argv) {
@@ -56,20 +51,14 @@ int main(int argc, char **argv) {
         float i = 1;
 
         int opt;
-        // Currently running children
-        int activeChildren = 0;
-        // Total children ever launched
-        int totalLaunched = 0;
-        // Set up real time safety timeout (60 seconds)
         signal(SIGALRM, signal_handler);
         alarm(3);
 
-        // parse command line arguments -n, -s, -t, -i, -f
+        // parse command line arguments
 	while ((opt = getopt(argc, argv, "hn:s:t:i:f:")) != -1) {
                 switch (opt) {
                         case 'h':
                                 std::cout << "To run program:\n\t ./oss -n # -s # -t # -i # -f file name\n";
-                                std::cout << "Replace # with an integer for n and s, and a float of t and i.\n";
                                 return 0;
 
                         // Total number of children to launch
@@ -91,46 +80,46 @@ int main(int argc, char **argv) {
                 exit(1);
         }
 
-	// initialize signal handling - avoid zombie processes
-	void signal_handler(int sig) {
-    		std::cout << "Caught signal " << sig << ", terminating...\n";
-    	// cleanup here later
-    	exit(1);
-	}
-
-	// create shared memory - system clock (seconds, nanoseconds)
+	// shared memory
 	int shmid = shmget(IPC_PRIVATE, sizeof(SimulatedClock), IPC_CREAT | 0666);
 	if (shmid == -1) {
     		perror("shmget failed");
-    	exit(1);
+    		exit(1);
 	}
 
 	SimulatedClock* clock = (SimulatedClock*) shmat(shmid, nullptr, 0);
 	if (clock == (void*) -1) {
     		perror("shmat failed");
-    	exit(1);
+    		exit(1);
 	}
+
 	clock->seconds = 0;
 	clock->nanoseconds = 0;
 
-	// initialize queues = ready queue (round robin), blocked queue (logic to scan PCBs)
-	std::queue<int> readyQueue;
-
-	// create message queue
+	// message queue
 	int msqid = msgget(IPC_PRIVATE, IPC_CREAT | 0666);
 	if  (msqid == -1) {
 		perror("msgget failed");
 		exit(1);
 	}
 
-	// create process control table - array of PCBs
+	// create process control table and queue
 	PCB processTable[20];
 	for (int j = 0; j < 20; j++) {
     		processTable[j].occupied = 0;
 	}
 
+	std::queue<int> readyQueue;
+
+	// variables
+	int activeChildren = 0;
+	int totalLaunched = 0;
+	int totalFinished = 0;
+
+	const int QUANTUM = 25000000;
+
 	// main while loop
-	while (totalLaunched < n || activeChildren < s) {
+	while (totalLaunched < n || activeChildren < 0) {
 		// Launch new children if allowed
 		if (totalLaunched < n && activeChildren < s) {
 			int index = -1;
@@ -167,7 +156,7 @@ int main(int argc, char **argv) {
 			}
 		}
 
-		// If ready queue has processes -> schedule
+		// schedule
 		if (!readyQueue.empty()) {
 
 			int index = readyQueue.front();
@@ -249,4 +238,6 @@ int main(int argc, char **argv) {
 	shmdt(clock);
 	shmctl(shmid, IPC_RMID, nullptr);
 	msgctl(msqid, IPC_RMID, nullptr);
+
+	return 0;
 };
