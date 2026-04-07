@@ -9,6 +9,7 @@
 #include <queue>
 #include <cstring>
 #include <fstream>
+#include <cmath>
 
 // Structs
 struct SimulatedClock {
@@ -35,10 +36,44 @@ struct msgbuffer {
 
 // Globals
 std::string filename = "log.txt";
+int msqid;
+int shmid;
+SimulatedClock* clock;
+
+PCB processTable[20];
+std::queue<int> readyQueue;
+
+void cleanup() {
+	shmdt(clock);
+	shmctl(shmid, IPC_RMID, nullptr);
+	msgctl(msqid, IPC_RMID, nullptr);
+}
 
 void signal_handler(int sig) {
 	std::cout << "Caught signal " << sig << ", terminating...\n";
 	exit(1);
+}
+
+// helpers
+void printQueue(std::queue<int> q, std::ofstream& logFile) {
+	logFile << "Ready queue [ ";
+	while (!q.empty()) {
+		logFile << "P" << q.front() << " ";
+		q.pop();
+	}
+	logFile << "]\n";
+}
+
+void printProcessTable(PCB table[], std::ofstream& logFile) {
+	logFile << "Process Table:\n";
+	for (int i = 0; i < 20; i++) {
+		if (table[i].occupied) {
+			logFile << "P" << i
+				<< " PID:" << table[i].pid
+				<< " Blocked:" << table[i].blocked
+				<< "\n";
+		}
+	}
 }
 
 // Main function
@@ -50,10 +85,10 @@ int main(int argc, char **argv) {
         float t = 1;
         float i = 1;
 
-        int opt;
         signal(SIGALRM, signal_handler);
         alarm(3);
 
+	int opt;
         // parse command line arguments
 	while ((opt = getopt(argc, argv, "hn:s:t:i:f:")) != -1) {
                 switch (opt) {
@@ -80,14 +115,20 @@ int main(int argc, char **argv) {
                 exit(1);
         }
 
+	std::ofstream logFile(filename);
+	if(!logFile) {
+		perror("log file failed");
+		exit(1);
+	}
+
 	// shared memory
-	int shmid = shmget(IPC_PRIVATE, sizeof(SimulatedClock), IPC_CREAT | 0666);
+	shmid = shmget(IPC_PRIVATE, sizeof(SimulatedClock), IPC_CREAT | 0666);
 	if (shmid == -1) {
     		perror("shmget failed");
     		exit(1);
 	}
 
-	SimulatedClock* clock = (SimulatedClock*) shmat(shmid, nullptr, 0);
+	clock = (SimulatedClock*) shmat(shmid, nullptr, 0);
 	if (clock == (void*) -1) {
     		perror("shmat failed");
     		exit(1);
@@ -97,27 +138,26 @@ int main(int argc, char **argv) {
 	clock->nanoseconds = 0;
 
 	// message queue
-	int msqid = msgget(IPC_PRIVATE, IPC_CREAT | 0666);
-	if  (msqid == -1) {
+	key_t key = ftok(".", 'A');
+	msqid = msgget(IPC_PRIVATE, IPC_CREAT | 0666);
+	if (msqid == -1) {
 		perror("msgget failed");
 		exit(1);
 	}
 
 	// create process control table and queue
-	PCB processTable[20];
 	for (int j = 0; j < 20; j++) {
     		processTable[j].occupied = 0;
 	}
 
-	std::queue<int> readyQueue;
-
 	// variables
 	int activeChildren = 0;
 	int totalLaunched = 0;
-	int totalFinished = 0;
-
 	const int QUANTUM = 25000000;
 
+	unsigned int lastPrintSec = 0;
+	unsigned int lastPrintNano = 0;
+	
 	// main while loop
 	while (totalLaunched < n || activeChildren < 0) {
 		// Launch new children if allowed
@@ -132,12 +172,6 @@ int main(int argc, char **argv) {
 
 			if (index != -1) {
 				pid_t pid = fork();
-
-				if (pid == -1) {
-					perror("fork failed");
-					exit(1);
-				}
-
 				if (pid == 0) {
 					execl("./worker", "./worker", nullptr);
 					perror("execl failed");
@@ -148,8 +182,15 @@ int main(int argc, char **argv) {
 				processsTable[index].occupied = 1;
 				processTable[index].pid = pid;
 				processTable[index].blocked = 0;
-				
+				processTable[index].startSeconds = clock->seconds;
+				processTable[index].startNano = clock->nanoseconds;
+
 				readyQueue.push(index);
+			
+				logFile << "OSS: Generated P: << index
+					<< " PID:" << pid
+					<< " at time " << clock->seconds
+					<< ":" << clock->nanoseconds << "\n";	
 
 				totalLaunched++;
 				activeChildren++;
@@ -159,10 +200,14 @@ int main(int argc, char **argv) {
 		// schedule
 		if (!readyQueue.empty()) {
 
+			printQueue(readyQueue, logFile);
+
 			int index = readyQueue.front();
 			readyQueue.pop();
-
 			pid_t pid = processTable[index].pid;
+
+			logFile << "OSS: Dispatching P: << index
+				<< " PID:" << pid << "\n";
 
 			// send message (dispatch)
 			msgbuffer msg;
@@ -183,6 +228,9 @@ int main(int argc, char **argv) {
 
 			int timeUsed = response.quantum;
 
+			logFile << "OSS: P" << index << " ran for "
+				<< abs(timeUsed) << " ns\n";
+
 			// update clock
 			clock->nanoseconds += abs(timeUsed);
 			while (clock->nanoseconds >= 1000000000) {
@@ -195,18 +243,18 @@ int main(int argc, char **argv) {
 				// terminated
 				processTable[index].occupied = 0;
 				activeChildren--;
-				totalFinished++;
 			}
 			else if (timeUsed < QUANTUM) {
-				// blocked
 				processTable[index].blocked = 1;
-
-				// set unblock time
 				processTable[index].eventWaitSec = clock->seconds;
-				processTable[index].eventWaitNano = clock->nanoseconds;
+				processTable[index].eventWaitNano = clock->nanoseconds + 100000000;
+				if (processTable[index].eventWaitNano >= 1000000000) {
+					processTable[index].eventWaitSec++;
+					processTable[index].eventWaitNano -= 1000000000;
+				}
 			}
+
 			else {
-				// used full quantum -> back to ready queue
 				readyQueue.push(index);
 			}
 		}
@@ -224,6 +272,16 @@ int main(int argc, char **argv) {
 			}
 		}
 
+		// print every 0.5 seconds
+		if ((clock->seconds > lastPrintSec) ||
+				(clock->seconds == lastPrintSec &&
+				 clock->nanoseconds - lastPrintNano >= 5000000000)) {
+
+			printProcessTable(processTable, logFile);
+			lastPrintSec = clock->seconds;
+			lastPrintNano = clock->nanoseconds;
+		}
+
 		// if nothing ready then advance clock
 		if (readyQueue.empty()) {
 			clock->nanoseconds += 1000;
@@ -235,9 +293,8 @@ int main(int argc, char **argv) {
 	}
 
 	// Cleanup
-	shmdt(clock);
-	shmctl(shmid, IPC_RMID, nullptr);
-	msgctl(msqid, IPC_RMID, nullptr);
+	cleanup();
+	logFile.close();
 
 	return 0;
 };
