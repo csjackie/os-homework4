@@ -115,7 +115,7 @@ int main(int argc, char **argv) {
     		exit(1);
 	}
 
-	SimulatedClock *simClock = (SimulatedClock *shmat(shmid, nullptr, 0);
+	SimulatedClock *simClock = (SimulatedClock *)shmat(shmid, nullptr, 0);
 	if (simClock == (void *) -1) {
     		perror("shmat failed");
     		exit(1);
@@ -126,7 +126,7 @@ int main(int argc, char **argv) {
 
 	// message queue
 	key_t key = ftok(".", 'A');
-	int msqid = msgget(IPC_PRIVATE, IPC_CREAT | 0666);
+	int msqid = msgget(key, IPC_CREAT | 0666);
 	if (msqid == -1) {
 		perror("msgget failed");
 		exit(1);
@@ -176,18 +176,18 @@ int main(int argc, char **argv) {
 				}
 
 				// PARENT
-				processsTable[index].occupied = 1;
+				processTable[index].occupied = 1;
 				processTable[index].pid = pid;
 				processTable[index].blocked = 0;
-				processTable[index].startSeconds = clock->seconds;
-				processTable[index].startNano = clock->nanoseconds;
+				processTable[index].startSeconds = simClock->seconds;
+				processTable[index].startNano = simClock->nanoseconds;
 
 				readyQueue.push(index);
 			
-				logFile << "OSS: Generated P: << index
+				logFile << "OSS: Generated P: " << index
 					<< " PID:" << pid
-					<< " at time " << clock->seconds
-					<< ":" << clock->nanoseconds << "\n";	
+					<< " at time " << simClock->seconds
+					<< ":" << simClock->nanoseconds << "\n";	
 
 				totalLaunched++;
 				activeChildren++;
@@ -203,7 +203,7 @@ int main(int argc, char **argv) {
 			readyQueue.pop();
 			pid_t pid = processTable[index].pid;
 
-			logFile << "OSS: Dispatching P: << index
+			logFile << "OSS: Dispatching P:"  << index
 				<< " PID:" << pid << "\n";
 
 			// send message (dispatch)
@@ -218,7 +218,7 @@ int main(int argc, char **argv) {
 
 			// receive response
 			msgbuffer response;
-			if (msgrcv(msqid, &response, sizeof(int), 1, 0) == -1) {
+			if (msgrcv(msqid, &response, sizeof(int), pid, 0) == -1) {
 				perror("msgrcv failed");
 				exit(1);
 			}
@@ -244,8 +244,8 @@ int main(int argc, char **argv) {
 			}
 			else if (timeUsed < QUANTUM) {
 				processTable[index].blocked = 1;
-				processTable[index].eventWaitSec = clock->seconds;
-				processTable[index].eventWaitNano = clock->nanoseconds + 100000000;
+				processTable[index].eventWaitSec = simClock->seconds;
+				processTable[index].eventWaitNano = simClock->nanoseconds + 100000000;
 				if (processTable[index].eventWaitNano >= 1000000000) {
 					processTable[index].eventWaitSec++;
 					processTable[index].eventWaitNano -= 1000000000;
