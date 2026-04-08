@@ -51,14 +51,17 @@ void signal_handler(int sig) {
 	exit(1);
 }
 
+// Increment simulated clock by given nanoseconds
 void incrementClock(int ns) {
 	simClock->nanoseconds += ns;
+	// Handle overflow into seconds
 	while (simClock->nanoseconds >= 1000000000) {
 		simClock->seconds++;
 		simClock->nanoseconds -= 1000000000;
 	}
 }
 
+// Print current ready queue (for debugging and logging)
 void printQueue(std::queue<int> q, std::ofstream &logFile) {
 	logFile << "Ready queue [ ";
 	while (!q.empty()) {
@@ -68,6 +71,7 @@ void printQueue(std::queue<int> q, std::ofstream &logFile) {
     	logFile << "]\n";
 }
 
+// Print process table snapshot
 void printProcessTable(PCB table[], std::ofstream &logFile) {
     	logFile << "Process Table:\n";
     	for (int i = 0; i < 20; i++) {
@@ -108,7 +112,7 @@ int main(int argc, char **argv) {
                 }
         }
 
-        // prints error message and exits program if the value of n, s, or t are out of range
+        // Prints error message and exits program if the value of n, s, or t are out of range
         if (n <= 0 || n > 20 || s <= 0 || s > n || t <= 0) {
                 std::cout << "Invalid argument values\n";
                 exit(1);
@@ -119,20 +123,20 @@ int main(int argc, char **argv) {
 
 	std::ofstream logFile(filename);
 	
-	// shared memory
+	// Shared memory
 	shmid = shmget(IPC_PRIVATE, sizeof(SimulatedClock), IPC_CREAT | 0666);
 	simClock = (SimulatedClock*)shmat(shmid, nullptr, 0);
 	simClock->seconds = 0;
 	simClock->nanoseconds = 0;
 
-	// message queue
+	// Message queue
 	msqid = msgget(IPC_PRIVATE, IPC_CREAT | 0666);
 
-	// create process control table and queue
+	// Create process control table and queue
 	PCB table[20] = {};
 	std::queue<int> readyQueue;
 
-	// variables
+	// Variables
 	int activeChildren = 0;
 	int totalLaunched = 0;
 	const int QUANTUM = 25000000;
@@ -144,16 +148,16 @@ int main(int argc, char **argv) {
 	unsigned int nextLaunchNano = 0;	
 	int logLines = 0;
 	
-	// main while loop
+	//////// Main while loop ///////
+	// Launch new processes
 	while (totalLaunched < n || activeChildren > 0) {
-		// Launch new children if allowed
+		// Only launch when simulated time reaches next launch time
 		if (totalLaunched < n && activeChildren < s) {
 			if (simClock->seconds > nextLaunchSec ||
 				(simClock->seconds == nextLaunchSec &&
 			 	simClock->nanoseconds >= nextLaunchNano)) {
-		       		
+		       		// Find free PCB slot
 				int idx = -1;
-				
 				for (int j = 0; j < 20; j++) {
 					if (!table[j].occupied) {
 						idx = j;
@@ -165,6 +169,7 @@ int main(int argc, char **argv) {
 					pid_t pid = fork();
 
 					if (pid == 0) {
+						// CHILD PROCESS: exec worker
 						char msqidStr[16], maxStr[16];
 						sprintf(msqidStr, "%d", msqid);
 						int maxCPU = 1 + rand() % (int)(t * 1e9);
@@ -173,7 +178,7 @@ int main(int argc, char **argv) {
 						execl("./worker", "./worker", msqidStr, maxStr, nullptr);
 						exit(1);
 					}
-
+					// PARENT: update PCB
 					table[idx].occupied = 1;
 					table[idx].pid = pid;
 					table[idx].blocked = 0;
@@ -182,11 +187,11 @@ int main(int argc, char **argv) {
 					readyQueue.push(idx);
 					
 					logFile << "OSS: Created P" << idx << " PID " << pid << "\n";
-					std::cout << "Created P" << idx << " PID " << pid << "\n";
 
 					totalLaunched++;
 					activeChildren++;
-
+					
+					// Schedule next launch time
 					nextLaunchNano = simClock->nanoseconds + (i * 1e9);
 					nextLaunchSec = simClock->seconds;
 					if (nextLaunchNano >= 1000000000) {
@@ -198,9 +203,10 @@ int main(int argc, char **argv) {
 			}
 		}
 
-		// check blocked processes and unblock
+		// Unblock processes
 		for (int j = 0; j < 20; j++) {
 			if (table[j].occupied && table[j].blocked) {
+				// If wait time expired, move back to ready queue
 				if (simClock->seconds > table[j].eventWaitSec ||
 					(simClock->seconds == table[j].eventWaitSec &&
 					simClock->nanoseconds >= table[j].eventWaitNano)) {
@@ -210,6 +216,7 @@ int main(int argc, char **argv) {
 			}
 		}
 
+		// Scheduling (Dispatch)
 		if (!readyQueue.empty()) {
 
 			printQueue(readyQueue, logFile);
@@ -221,6 +228,7 @@ int main(int argc, char **argv) {
 				continue;
 			}
 
+			// Skip if still blocked
 			if (table[idx].blocked) {
 				readyQueue.pop();
 				readyQueue.push(idx);
@@ -232,16 +240,18 @@ int main(int argc, char **argv) {
 			pid_t pid = table[idx].pid;
 
 			logFile << "Dispatching P" << idx << "\n";
-			std::cout << "Dispatching P" << idx << "\n";
 
+			// Send quantum to worker
 			msgbuffer msg;
 			msg.mtype = pid;
 			msg.quantum = QUANTUM;
 
 			msgsnd(msqid, &msg, sizeof(msg.quantum), 0);
 
+			// Small dispatch overhead
 			incrementClock(10000);
 
+			// Receive results from worker
 			msgbuffer res;
 			if (msgrcv(msqid, &res, sizeof(res.quantum), pid, 0) == -1) {
 				perror("msgrcv failed");
@@ -256,13 +266,16 @@ int main(int argc, char **argv) {
 
 			table[idx].totalCPU += used;
 
+			// Process result handling
 			if (res.quantum < 0) {
+				// Process terminated
 				waitpid(pid, nullptr, 0);
 				table[idx].occupied = 0;
 				activeChildren--;
 			}
 			
 			else if (used < QUANTUM) {
+				// Process blocked
 				table[idx].blocked = 1;
 
 				table[idx].eventWaitSec = simClock->seconds;
@@ -274,16 +287,19 @@ int main(int argc, char **argv) {
 				}
 			}
 			else {
+				// Time slice expired, requeue
 				readyQueue.push(idx);
 			}
 		}
 
 		else {
+			// No ready proceses, advance time
 			incrementClock(1000000);
 		}
 
 		if (++logLines > 10000) break;
 	
+		// Periodic process table print
 		if ((simClock->seconds > lastPrintSec) ||
 				(simClock->seconds == lastPrintSec &&
 				 simClock->nanoseconds >= lastPrintNano + 500000000)) {
