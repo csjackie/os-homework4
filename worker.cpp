@@ -4,6 +4,7 @@
 #include <sys/ipc.h>
 #include <sys/msg.h>
 #include <ctime>
+#include <cerrno>
 
 struct msgbuffer {
 	long mtype;
@@ -11,12 +12,10 @@ struct msgbuffer {
 };
 
 int main(int argc, char** argv) {
-	if (argc < 2) {
-		perror("missing msqid");
-		return 1;
-	}
+	if (argc < 3) return 1;
 
 	int msqid = atoi(argv[1]);
+	int maxCPU = atoi(argv[2]);
 	pid_t pid = getpid();
 
 	// Seed random using PID
@@ -28,47 +27,53 @@ int main(int argc, char** argv) {
 		msgbuffer msg;
 
 		// wait for message from oss
-		if (msgrcv(msqid, &msg, sizeof(msg.quantum), getpid(), 0) == -1) {
-	            perror("msgrcv failed");
-        	    exit(1);
+		if (msgrcv(msqid, &msg, sizeof(msg.quantum), pid, 0) == -1) {
+	            	if (errno == EIDRM) exit(0);
+			perror("msgrcv");
+        	    	exit(1);
         	}	
 
         	int quantum = msg.quantum;
-
 		int action = rand() % 100;
-		int usedTime = 0;
+		int used = 0;
 
-        	msgbuffer response;
-        	response.mtype = 1;
+        	msgbuffer res;
+        	res.mtype = pid;
+
+		if (totalCPU >= maxCPU) {
+			res.quantum = -1;
+			msgsnd(msqid, &res, sizeof(int), 0);
+			break;
+		}
 
 		if (action < 20) {
-			usedTime = 1 + rand() % quantum;
-			response.quantum = usedTime;
+			used = 1 + rand() % quantum;
+			res.quantum = used;
 		}
 
 		else if (action < 40) {
-			usedTime = 1 +rand() % quantum;
-		     	response.quantum = -usedTime;	
-
-			if (msgsnd(msqid, &response, sizeof(response.quantum), 0) == -1) {
-			   	perror("msgsnd failed");
-			   	exit(1);
-		   	}
-		   	break;
-        	}
+			used = 1 + rand() % quantum;
+		     	res.quantum = -used;
+			msgsnd(msqid, &res, sizeof(int), 0);
+			break;
+		}	
 
 		else {
-			usedTime = quantum;
-			response.quantum = usedTime;
+			used = quantum;
+			res.quantum = used;
 		}
 
-		totalCPU += usedTime;
+		totalCPU += used;
 
-		if (msgsnd(msqid, &response, sizeof(response.quantum), 0) == -1) {
-			perror("msgsnd failed");
-			exit(1);
+		if (totalCPU >= maxCPU) {
+			res.quantum = -used;
+			msgsnd(msqid, &res, sizeof(int), 0);
+			break;
 		}
+		
+		msgsnd(msqid, &res, sizeof(res.quantum), 0);
 	}
+
 	return 0;
 }
 
